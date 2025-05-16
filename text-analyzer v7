@@ -1,0 +1,541 @@
+import { useState } from 'react'
+import { Button } from "/components/ui/button"
+import { Card, CardContent, CardHeader, CardTitle } from "/components/ui/card"
+import { Textarea } from "@/components/ui/textarea"
+import { Label } from "/components/ui/label"
+import { Copy, Loader2, FileInput } from "lucide-react"
+import { motion, AnimatePresence } from "framer-motion"
+
+const API_KEY = "AIzaSyDK68voN4wRnCh95nrlu0m9vHbtJKOECqM"
+const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${API_KEY}`
+
+const DEFAULT_PROMPT = `You are an expert AI Text Analyzer tasked with performing a thorough examination of a provided text. Your objective is to deliver five distinct, clearly labeled outputs based solely on the content of the text I will provide. 
+
+1. Summary: Generate a concise (3-5 sentences), neutral summary capturing the core essence and main arguments.
+2. Key Points: Extract 3-7 bullet points highlighting significant facts, names, dates, data, or concepts.
+3. Sentiment Analysis: Determine the emotional tone (Positive/Negative/Neutral/Mixed) with one-sentence justification.
+4. Key Entities: List important entities (persons, organizations, locations, dates, technical terms).
+5. Questions & Answers: Create 2-4 relevant Q&A pairs with answers found in the text.
+
+Format your response EXACTLY like this:
+
+Summary:
+[Your summary here]
+
+Key Points:
+- [Point 1]
+- [Point 2]
+- [...]
+
+Sentiment Analysis:
+[Label]: [Justification]
+
+Key Entities:
+- [Type]: [Entity]
+- [...]
+
+Questions & Answers:
+Q: [Question 1]
+A: [Answer 1]
+Q: [Question 2]
+A: [Answer 2]
+[...]
+
+Now analyze this text:
+`
+
+type AnalysisResult = {
+  summary: string
+  keyPoints: string[]
+  sentiment: {
+    label: 'Positive' | 'Negative' | 'Neutral' | 'Mixed'
+    justification: string
+  }
+  entities: {
+    type: string
+    name: string
+  }[]
+  qa: {
+    question: string
+    answer: string
+  }[]
+}
+
+export default function TextAnalyzer() {
+  const [inputText, setInputText] = useState('')
+  const [result, setResult] = useState<AnalysisResult | null>(null)
+  const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  const analyzeText = async () => {
+    if (!inputText.trim()) {
+      setError('Please enter text to analyze')
+      return
+    }
+
+    setIsLoading(true)
+    setError('')
+    setResult(null)
+
+    try {
+      const fullPrompt = DEFAULT_PROMPT + `"""${inputText}"""`
+      
+      const response = await fetch(API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          contents: [{
+            parts: [{ text: fullPrompt }]
+          }],
+          generationConfig: {
+            temperature: 0.3,
+            topP: 0.95,
+            topK: 40,
+            maxOutputTokens: 2048,
+          }
+        })
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.error?.message || 'API request failed')
+      }
+
+      const data = await response.json()
+      const responseText = data.candidates?.[0]?.content?.parts?.[0]?.text || ''
+      
+      if (!responseText) throw new Error('No analysis generated')
+      
+      // Parse the structured response
+      const parsed = parseAnalysis(responseText)
+      setResult(parsed)
+    } catch (err) {
+      console.error('Analysis error:', err)
+      setError(`Analysis failed: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const parseAnalysis = (text: string): AnalysisResult => {
+    const summaryMatch = text.match(/Summary:\s*(.*?)(?=\nKey Points:|$)/s)
+    const keyPointsMatch = text.match(/Key Points:\s*((?:-.*?\n)+)/s)
+    const sentimentMatch = text.match(/Sentiment Analysis:\s*(.*?):\s*(.*?)(?=\nKey Entities:|$)/)
+    const entitiesMatch = text.match(/Key Entities:\s*((?:-.*?\n)+)/s)
+    const qaMatch = text.match(/Questions & Answers:\s*((?:Q:.*?\nA:.*?\n)+)/s)
+
+    return {
+      summary: summaryMatch?.[1]?.trim() || 'No summary generated',
+      keyPoints: keyPointsMatch?.[1]?.split('\n').filter(p => p.trim()).map(p => p.replace(/^- /, '').trim()) || [],
+      sentiment: {
+        label: (sentimentMatch?.[1]?.trim() as any) || 'Neutral',
+        justification: sentimentMatch?.[2]?.trim() || 'No sentiment analysis available'
+      },
+      entities: entitiesMatch?.[1]?.split('\n')
+        .filter(e => e.trim())
+        .map(e => {
+          const match = e.match(/^- (.*?): (.*)/)
+          return match ? { type: match[1].trim(), name: match[2].trim() } : null
+        })
+        .filter(Boolean) as { type: string, name: string }[] || [],
+      qa: qaMatch?.[1]?.split('\nQ:')
+        .map(qa => {
+          const [q, a] = qa.split('\nA:')
+          return {
+            question: q?.replace(/^Q:/, '').trim() || '',
+            answer: a?.trim() || ''
+          }
+        })
+        .filter(qa => qa.question && qa.answer) || []
+    }
+  }
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+
+    const reader = new FileReader()
+    reader.onload = (event) => {
+      const content = event.target?.result as string
+      setInputText(content)
+    }
+    reader.readAsText(file)
+  }
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text)
+  }
+
+  const getSentimentColor = () => {
+    if (!result?.sentiment) return 'bg-gray-100 text-gray-800'
+    switch (result.sentiment.label) {
+      case 'Positive': return 'bg-green-100 text-green-800'
+      case 'Negative': return 'bg-red-100 text-red-800'
+      case 'Neutral': return 'bg-blue-100 text-blue-800'
+      case 'Mixed': return 'bg-purple-100 text-purple-800'
+      default: return 'bg-gray-100 text-gray-800'
+    }
+  }
+
+  const getEntityColor = (type: string) => {
+    switch (type.toLowerCase()) {
+      case 'person': return 'bg-blue-100 text-blue-800'
+      case 'organization': return 'bg-green-100 text-green-800'
+      case 'location': return 'bg-red-100 text-red-800'
+      case 'date': return 'bg-yellow-100 text-yellow-800'
+      default: return 'bg-gray-100 text-gray-800'
+    }
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50 py-8 px-4 sm:px-6 lg:px-8">
+      <div className="max-w-7xl mx-auto space-y-6">
+        {/* Header */}
+        <div className="text-center">
+          <h1 className="text-3xl font-bold text-gray-900">Advanced Text Analyzer</h1>
+          <p className="mt-2 text-gray-600">
+            Comprehensive text analysis with AI-powered insights
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Left Column - Input */}
+          <div className="space-y-6">
+            <Card>
+              <CardHeader>
+                <CardTitle>Input Text</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <Textarea
+                  value={inputText}
+                  onChange={(e) => setInputText(e.target.value)}
+                  rows={12}
+                  placeholder="Paste your text here or upload a file..."
+                  className="min-h-[200px]"
+                />
+                
+                <div className="flex items-center justify-between">
+                  <div>
+                    <Label htmlFor="file-upload" className="flex items-center gap-2 cursor-pointer">
+                      <FileInput className="h-4 w-4" />
+                      <span>Upload Text File</span>
+                    </Label>
+                    <input
+                      id="file-upload"
+                      type="file"
+                      accept=".txt,.md"
+                      onChange={handleFileUpload}
+                      className="hidden"
+                    />
+                  </div>
+                  <div className="text-sm text-gray-500">
+                    {inputText.split(/\s+/).filter(Boolean).length} words
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Button
+              onClick={analyzeText}
+              disabled={isLoading || !inputText.trim()}
+              className="w-full h-12"
+            >
+              {isLoading ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Analyzing...
+                </>
+              ) : (
+                'Analyze Text'
+              )}
+            </Button>
+
+            {error && (
+              <div className="p-4 bg-red-50 text-red-700 rounded-md">
+                {error}
+              </div>
+            )}
+          </div>
+
+          {/* Middle Column - Summary & Key Points */}
+          <div className="space-y-6">
+            <Card>
+              <CardHeader>
+                <div className="flex justify-between items-center">
+                  <CardTitle>Summary</CardTitle>
+                  {result?.summary && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => copyToClipboard(result.summary)}
+                    >
+                      <Copy className="h-4 w-4 mr-2" />
+                      Copy
+                    </Button>
+                  )}
+                </div>
+              </CardHeader>
+              <CardContent>
+                <AnimatePresence>
+                  {isLoading ? (
+                    <motion.div
+                      initial={{ opacity: 0.5 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      className="flex items-center justify-center h-32"
+                    >
+                      <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
+                    </motion.div>
+                  ) : result?.summary ? (
+                    <motion.div
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      className="prose max-w-none"
+                    >
+                      <p className="whitespace-pre-line">{result.summary}</p>
+                    </motion.div>
+                  ) : (
+                    <div className="text-gray-400 italic">
+                      Summary will appear here
+                    </div>
+                  )}
+                </AnimatePresence>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <div className="flex justify-between items-center">
+                  <CardTitle>Key Points</CardTitle>
+                  {result?.keyPoints.length ? (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => copyToClipboard(result.keyPoints.join('\n'))}
+                    >
+                      <Copy className="h-4 w-4 mr-2" />
+                      Copy All
+                    </Button>
+                  ) : null}
+                </div>
+              </CardHeader>
+              <CardContent>
+                <AnimatePresence>
+                  {isLoading ? (
+                    <motion.div
+                      initial={{ opacity: 0.5 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      className="flex items-center justify-center h-32"
+                    >
+                      <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
+                    </motion.div>
+                  ) : result?.keyPoints.length ? (
+                    <motion.ol
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      className="space-y-3 list-decimal pl-5"
+                    >
+                      {result.keyPoints.map((point, index) => (
+                        <motion.li
+                          key={index}
+                          initial={{ y: 10, opacity: 0 }}
+                          animate={{ y: 0, opacity: 1 }}
+                          transition={{ delay: index * 0.05 }}
+                          className="group"
+                        >
+                          <div className="flex justify-between items-start">
+                            <span>{point}</span>
+                            <button
+                              onClick={() => copyToClipboard(point)}
+                              className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-full hover:bg-gray-100"
+                              aria-label="Copy point"
+                            >
+                              <Copy className="h-4 w-4" />
+                            </button>
+                          </div>
+                        </motion.li>
+                      ))}
+                    </motion.ol>
+                  ) : (
+                    <div className="text-gray-400 italic">
+                      Key points will appear here
+                    </div>
+                  )}
+                </AnimatePresence>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Right Column - Advanced Analyses */}
+          <div className="space-y-6">
+            <Card>
+              <CardHeader>
+                <CardTitle>Sentiment Analysis</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <AnimatePresence>
+                  {isLoading ? (
+                    <motion.div
+                      initial={{ opacity: 0.5 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      className="flex items-center justify-center h-32"
+                    >
+                      <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
+                    </motion.div>
+                  ) : result?.sentiment ? (
+                    <motion.div
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      className="space-y-4"
+                    >
+                      <div className={`inline-flex items-center px-3 py-1 rounded-full text-sm font-medium ${getSentimentColor()}`}>
+                        {result.sentiment.label}
+                      </div>
+                      <p className="text-sm">{result.sentiment.justification}</p>
+                    </motion.div>
+                  ) : (
+                    <div className="text-gray-400 italic">
+                      Sentiment analysis will appear here
+                    </div>
+                  )}
+                </AnimatePresence>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <div className="flex justify-between items-center">
+                  <CardTitle>Key Entities</CardTitle>
+                  {result?.entities.length ? (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => copyToClipboard(result.entities.map(e => `${e.type}: ${e.name}`).join('\n'))}
+                    >
+                      <Copy className="h-4 w-4 mr-2" />
+                      Copy All
+                    </Button>
+                  ) : null}
+                </div>
+              </CardHeader>
+              <CardContent>
+                <AnimatePresence>
+                  {isLoading ? (
+                    <motion.div
+                      initial={{ opacity: 0.5 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      className="flex items-center justify-center h-32"
+                    >
+                      <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
+                    </motion.div>
+                  ) : result?.entities.length ? (
+                    <motion.div
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      className="space-y-3"
+                    >
+                      {Array.from(new Set(result.entities.map(e => e.type))).map((type) => {
+                        const filtered = result.entities.filter(e => e.type === type)
+                        return (
+                          <div key={type} className="space-y-2">
+                            <h3 className="text-sm font-medium text-gray-500">
+                              {type}s
+                            </h3>
+                            <div className="flex flex-wrap gap-2">
+                              {filtered.map((entity, i) => (
+                                <motion.div
+                                  key={`${type}-${i}`}
+                                  initial={{ scale: 0.9, opacity: 0 }}
+                                  animate={{ scale: 1, opacity: 1 }}
+                                  transition={{ delay: i * 0.05 }}
+                                  className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getEntityColor(entity.type)}`}
+                                >
+                                  {entity.name}
+                                </motion.div>
+                              ))}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </motion.div>
+                  ) : (
+                    <div className="text-gray-400 italic">
+                      Key entities will appear here
+                    </div>
+                  )}
+                </AnimatePresence>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <div className="flex justify-between items-center">
+                  <CardTitle>Questions & Answers</CardTitle>
+                  {result?.qa.length ? (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => copyToClipboard(result.qa.map(q => `Q: ${q.question}\nA: ${q.answer}`).join('\n\n'))}
+                    >
+                      <Copy className="h-4 w-4 mr-2" />
+                      Copy All
+                    </Button>
+                  ) : null}
+                </div>
+              </CardHeader>
+              <CardContent>
+                <AnimatePresence>
+                  {isLoading ? (
+                    <motion.div
+                      initial={{ opacity: 0.5 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      className="flex items-center justify-center h-32"
+                    >
+                      <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
+                    </motion.div>
+                  ) : result?.qa.length ? (
+                    <motion.div
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      className="space-y-4"
+                    >
+                      {result.qa.map((qa, i) => (
+                        <motion.div
+                          key={i}
+                          initial={{ y: 10, opacity: 0 }}
+                          animate={{ y: 0, opacity: 1 }}
+                          transition={{ delay: i * 0.1 }}
+                          className="group"
+                        >
+                          <div className="font-medium text-gray-900">Q: {qa.question}</div>
+                          <div className="mt-1 text-gray-700">A: {qa.answer}</div>
+                          <button
+                            onClick={() => copyToClipboard(`Q: ${qa.question}\nA: ${qa.answer}`)}
+                            className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-full hover:bg-gray-100"
+                            aria-label="Copy Q&A"
+                          >
+                            <Copy className="h-4 w-4" />
+                          </button>
+                        </motion.div>
+                      ))}
+                    </motion.div>
+                  ) : (
+                    <div className="text-gray-400 italic">
+                      Questions and answers will appear here
+                    </div>
+                  )}
+                </AnimatePresence>
+              </CardContent>
+            </Card>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
