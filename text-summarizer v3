@@ -1,0 +1,258 @@
+import { useState } from 'react'
+import { Button } from "/components/ui/button"
+import { Card, CardContent, CardHeader, CardTitle } from "/components/ui/card"
+import { Textarea } from "@/components/ui/textarea"
+import { Label } from "/components/ui/label"
+import { Slider } from "/components/ui/slider"
+import { Copy, Loader2 } from "lucide-react"
+
+const API_KEY = "AIzaSyDK68voN4wRnCh95nrlu0m9vHbtJKOECqM"
+const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${API_KEY}`
+
+export default function TextSummarizer() {
+  const [inputText, setInputText] = useState('')
+  const [summary, setSummary] = useState('')
+  const [keyPoints, setKeyPoints] = useState<string[]>([])
+  const [isLoading, setIsLoading] = useState(false)
+  const [summaryLength, setSummaryLength] = useState(3)
+  const [keyPointsCount, setKeyPointsCount] = useState(5)
+  const [focusTechnical, setFocusTechnical] = useState(false)
+  const [neutralTone, setNeutralTone] = useState(false)
+  const [error, setError] = useState('')
+
+  const generateWithGemini = async (prompt: string) => {
+    try {
+      const response = await fetch(API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          contents: [{
+            parts: [{ text: prompt }]
+          }],
+          generationConfig: {
+            temperature: 0.5,
+            topP: 0.95,
+            topK: 64,
+            maxOutputTokens: 8192,
+          }
+        })
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.error?.message || `API request failed with status ${response.status}`)
+      }
+
+      const data = await response.json()
+      return data.candidates?.[0]?.content?.parts?.[0]?.text || ''
+    } catch (err) {
+      console.error('Error calling Gemini API:', err)
+      setError(`Failed to generate content: ${err instanceof Error ? err.message : String(err)}`)
+      return ''
+    }
+  }
+
+  const summarizeText = async () => {
+    if (!inputText.trim()) {
+      setError('Please enter some text to summarize')
+      return
+    }
+
+    setIsLoading(true)
+    setError('')
+    setSummary('')
+    setKeyPoints([])
+    
+    try {
+      // Generate summary
+      const summaryPrompt = `Summarize the following text in exactly ${summaryLength} sentences${
+        focusTechnical ? ' with a technical focus' : ''
+      }${
+        neutralTone ? ' using a completely neutral tone' : ''
+      }. Return only the summary without any additional commentary:\n\n${inputText}`
+      
+      const summaryResult = await generateWithGemini(summaryPrompt)
+      if (summaryResult) {
+        setSummary(summaryResult)
+      } else {
+        throw new Error('No summary was generated')
+      }
+
+      // Generate key points
+      const keyPointsPrompt = `Extract exactly ${keyPointsCount} key points from the following text${
+        focusTechnical ? ' with a technical focus' : ''
+      }${
+        neutralTone ? ' using a completely neutral tone' : ''
+      }. Return them as a numbered list without any additional commentary:\n\n${inputText}`
+      
+      const keyPointsResult = await generateWithGemini(keyPointsPrompt)
+      if (keyPointsResult) {
+        const points = keyPointsResult.split('\n')
+          .filter(p => p.trim().length > 0)
+          .map(p => p.replace(/^\d+\.\s*/, '').trim())
+        setKeyPoints(points.slice(0, keyPointsCount))
+      } else {
+        throw new Error('No key points were generated')
+      }
+    } catch (err) {
+      console.error('Error during summarization:', err)
+      setError(`An error occurred: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text)
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
+      <div className="max-w-4xl mx-auto space-y-8">
+        <div className="text-center">
+          <h1 className="text-3xl font-bold text-gray-900">AI Text Summarizer</h1>
+          <p className="mt-2 text-gray-600">
+            Powered by Gemini AI - Paste your text below to generate a summary and extract key points
+          </p>
+        </div>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Input Text</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-6">
+              <div className="space-y-2">
+                <Label htmlFor="input-text">Paste your text here</Label>
+                <Textarea
+                  id="input-text"
+                  value={inputText}
+                  onChange={(e) => setInputText(e.target.value)}
+                  rows={8}
+                  placeholder="Enter or paste the text you want to summarize..."
+                />
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="space-y-4">
+                  <div>
+                    <Label>Summary Length: {summaryLength} sentences</Label>
+                    <Slider
+                      defaultValue={[summaryLength]}
+                      min={1}
+                      max={10}
+                      step={1}
+                      onValueChange={(value) => setSummaryLength(value[0])}
+                    />
+                  </div>
+                  <div>
+                    <Label>Key Points: {keyPointsCount}</Label>
+                    <Slider
+                      defaultValue={[keyPointsCount]}
+                      min={1}
+                      max={10}
+                      step={1}
+                      onValueChange={(value) => setKeyPointsCount(value[0])}
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <div className="flex items-center space-x-2">
+                    <input
+                      type="checkbox"
+                      id="technical"
+                      checked={focusTechnical}
+                      onChange={(e) => setFocusTechnical(e.target.checked)}
+                      className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                    />
+                    <Label htmlFor="technical">Focus on Technical Details</Label>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <input
+                      type="checkbox"
+                      id="neutral"
+                      checked={neutralTone}
+                      onChange={(e) => setNeutralTone(e.target.checked)}
+                      className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                    />
+                    <Label htmlFor="neutral">Neutral Tone Only</Label>
+                  </div>
+                </div>
+              </div>
+
+              {error && (
+                <div className="text-red-500 text-sm">{error}</div>
+              )}
+
+              <Button
+                onClick={summarizeText}
+                disabled={isLoading || !inputText.trim()}
+                className="w-full"
+              >
+                {isLoading ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Processing...
+                  </>
+                ) : (
+                  'Summarize & Extract Key Points'
+                )}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        {(summary || keyPoints.length > 0) && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {summary && (
+              <Card>
+                <CardHeader>
+                  <div className="flex justify-between items-center">
+                    <CardTitle>Summary</CardTitle>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => copyToClipboard(summary)}
+                    >
+                      <Copy className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <p className="whitespace-pre-line">{summary}</p>
+                </CardContent>
+              </Card>
+            )}
+
+            {keyPoints.length > 0 && (
+              <Card>
+                <CardHeader>
+                  <div className="flex justify-between items-center">
+                    <CardTitle>Key Points</CardTitle>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => copyToClipboard(keyPoints.join('\n'))}
+                    >
+                      <Copy className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <ol className="space-y-2 list-decimal pl-5">
+                    {keyPoints.map((point, index) => (
+                      <li key={index}>{point}</li>
+                    ))}
+                  </ol>
+                </CardContent>
+              </Card>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
