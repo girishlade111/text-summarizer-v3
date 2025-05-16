@@ -1,0 +1,820 @@
+import { useState } from 'react'
+import { Button } from "/components/ui/button"
+import { Card, CardContent, CardHeader, CardTitle } from "/components/ui/card"
+import { Textarea } from "@/components/ui/textarea"
+import { Label } from "/components/ui/label"
+import { Slider } from "/components/ui/slider"
+import { Copy, Loader2, FileInput, Languages, Filter, Plus, Trash2 } from "lucide-react"
+import { motion, AnimatePresence } from "framer-motion"
+
+const API_KEY = "AIzaSyDK68voN4wRnCh95nrlu0m9vHbtJKOECqM"
+const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${API_KEY}`
+
+type Sentiment = {
+  label: 'positive' | 'negative' | 'neutral' | 'mixed'
+  score: number
+  explanation: string
+}
+
+type Entity = {
+  text: string
+  type: 'person' | 'organization' | 'location' | 'date' | 'other'
+}
+
+type QA = {
+  question: string
+  answer: string
+}
+
+export default function TextAnalyzer() {
+  const [inputText, setInputText] = useState('')
+  const [summary, setSummary] = useState('')
+  const [keyPoints, setKeyPoints] = useState<string[]>([])
+  const [sentiment, setSentiment] = useState<Sentiment | null>(null)
+  const [entities, setEntities] = useState<Entity[]>([])
+  const [questions, setQuestions] = useState<QA[]>([])
+  const [isLoading, setIsLoading] = useState(false)
+  const [activeProcesses, setActiveProcesses] = useState<string[]>([])
+  const [error, setError] = useState('')
+  
+  // Settings
+  const [summaryLength, setSummaryLength] = useState(3)
+  const [keyPointsCount, setKeyPointsCount] = useState(5)
+  const [outputLanguage, setOutputLanguage] = useState('English')
+  const [includeKeywords, setIncludeKeywords] = useState<string[]>([])
+  const [excludeKeywords, setExcludeKeywords] = useState<string[]>([])
+  const [keywordInput, setKeywordInput] = useState('')
+  const [analysisOptions, setAnalysisOptions] = useState({
+    summary: true,
+    keyPoints: true,
+    sentiment: true,
+    entities: true,
+    qa: true
+  })
+
+  const analyzeText = async () => {
+    if (!inputText.trim()) {
+      setError('Please enter text to analyze')
+      return
+    }
+
+    setIsLoading(true)
+    setError('')
+    setActiveProcesses([])
+    
+    // Reset previous results
+    if (analysisOptions.summary) setSummary('')
+    if (analysisOptions.keyPoints) setKeyPoints([])
+    if (analysisOptions.sentiment) setSentiment(null)
+    if (analysisOptions.entities) setEntities([])
+    if (analysisOptions.qa) setQuestions([])
+
+    try {
+      const processes = []
+      
+      if (analysisOptions.summary) {
+        processes.push('summary')
+        setActiveProcesses(prev => [...prev, 'summary'])
+        const summaryResult = await generateSummary()
+        setSummary(summaryResult)
+      }
+
+      if (analysisOptions.keyPoints) {
+        processes.push('keyPoints')
+        setActiveProcesses(prev => [...prev, 'keyPoints'])
+        const keyPointsResult = await generateKeyPoints()
+        setKeyPoints(keyPointsResult)
+      }
+
+      if (analysisOptions.sentiment) {
+        processes.push('sentiment')
+        setActiveProcesses(prev => [...prev, 'sentiment'])
+        const sentimentResult = await analyzeSentiment()
+        setSentiment(sentimentResult)
+      }
+
+      if (analysisOptions.entities) {
+        processes.push('entities')
+        setActiveProcesses(prev => [...prev, 'entities'])
+        const entitiesResult = await extractEntities()
+        setEntities(entitiesResult)
+      }
+
+      if (analysisOptions.qa) {
+        processes.push('qa')
+        setActiveProcesses(prev => [...prev, 'qa'])
+        const qaResult = await generateQuestions()
+        setQuestions(qaResult)
+      }
+
+    } catch (err) {
+      console.error('Analysis error:', err)
+      setError(`Analysis failed: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setIsLoading(false)
+      setActiveProcesses([])
+    }
+  }
+
+  const generateWithGemini = async (prompt: string) => {
+    try {
+      const response = await fetch(API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          contents: [{
+            parts: [{ text: prompt }]
+          }],
+          generationConfig: {
+            temperature: 0.3,
+            topP: 0.95,
+            topK: 40,
+            maxOutputTokens: 2048,
+          }
+        })
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.error?.message || 'API request failed')
+      }
+
+      const data = await response.json()
+      return data.candidates?.[0]?.content?.parts?.[0]?.text || ''
+    } catch (err) {
+      console.error('API Error:', err)
+      throw err
+    }
+  }
+
+  const generateSummary = async () => {
+    const prompt = `Generate a ${summaryLength}-sentence summary in ${outputLanguage} of the following text${
+      includeKeywords.length > 0 ? ` focusing on: ${includeKeywords.join(', ')}` : ''
+    }${
+      excludeKeywords.length > 0 ? ` while avoiding: ${excludeKeywords.join(', ')}` : ''
+    }. Be concise and factual:\n\n${inputText}`
+    
+    return await generateWithGemini(prompt)
+  }
+
+  const generateKeyPoints = async () => {
+    const prompt = `Extract ${keyPointsCount} key points from this text in ${outputLanguage}${
+      includeKeywords.length > 0 ? ` focusing on: ${includeKeywords.join(', ')}` : ''
+    }${
+      excludeKeywords.length > 0 ? ` while avoiding: ${excludeKeywords.join(', ')}` : ''
+    }. Format as numbered bullets with no extra text:\n\n${inputText}`
+    
+    const result = await generateWithGemini(prompt)
+    return result.split('\n')
+      .filter(p => p.trim().length > 0)
+      .map(p => p.replace(/^\d+[\.\)]\s*/, '').trim())
+      .slice(0, keyPointsCount)
+  }
+
+  const analyzeSentiment = async (): Promise<Sentiment> => {
+    const prompt = `Analyze the sentiment of this text in ${outputLanguage} and respond in this exact JSON format:
+{
+  "label": "positive|negative|neutral|mixed",
+  "score": 0-1,
+  "explanation": "brief explanation"
+}\n\nText:\n${inputText}`
+    
+    const result = await generateWithGemini(prompt)
+    try {
+      return JSON.parse(result)
+    } catch {
+      return {
+        label: 'neutral',
+        score: 0.5,
+        explanation: 'Sentiment analysis could not be determined'
+      }
+    }
+  }
+
+  const extractEntities = async (): Promise<Entity[]> => {
+    const prompt = `List all important entities (people, organizations, locations, dates) from this text in ${outputLanguage} as a JSON array:
+[{
+  "text": "entity name",
+  "type": "person|organization|location|date|other"
+}]\n\nText:\n${inputText}`
+    
+    const result = await generateWithGemini(prompt)
+    try {
+      return JSON.parse(result)
+    } catch {
+      return []
+    }
+  }
+
+  const generateQuestions = async (): Promise<QA[]> => {
+    const prompt = `Generate 3 questions and their answers from this text in ${outputLanguage}. Respond in this exact JSON format:
+[{
+  "question": "the question",
+  "answer": "the answer"
+}]\n\nText:\n${inputText}`
+    
+    const result = await generateWithGemini(prompt)
+    try {
+      return JSON.parse(result)
+    } catch {
+      return []
+    }
+  }
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+
+    const reader = new FileReader()
+    reader.onload = (event) => {
+      const content = event.target?.result as string
+      setInputText(content)
+    }
+    reader.readAsText(file)
+  }
+
+  const addKeyword = (list: 'include' | 'exclude') => {
+    if (!keywordInput.trim()) return
+    
+    if (list === 'include') {
+      setIncludeKeywords([...includeKeywords, keywordInput.trim()])
+    } else {
+      setExcludeKeywords([...excludeKeywords, keywordInput.trim()])
+    }
+    
+    setKeywordInput('')
+  }
+
+  const removeKeyword = (list: 'include' | 'exclude', index: number) => {
+    if (list === 'include') {
+      setIncludeKeywords(includeKeywords.filter((_, i) => i !== index))
+    } else {
+      setExcludeKeywords(excludeKeywords.filter((_, i) => i !== index))
+    }
+  }
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text)
+  }
+
+  const getSentimentColor = () => {
+    if (!sentiment) return 'bg-gray-100 text-gray-800'
+    switch (sentiment.label) {
+      case 'positive': return 'bg-green-100 text-green-800'
+      case 'negative': return 'bg-red-100 text-red-800'
+      case 'neutral': return 'bg-blue-100 text-blue-800'
+      case 'mixed': return 'bg-purple-100 text-purple-800'
+      default: return 'bg-gray-100 text-gray-800'
+    }
+  }
+
+  const getEntityColor = (type: Entity['type']) => {
+    switch (type) {
+      case 'person': return 'bg-blue-100 text-blue-800'
+      case 'organization': return 'bg-green-100 text-green-800'
+      case 'location': return 'bg-red-100 text-red-800'
+      case 'date': return 'bg-yellow-100 text-yellow-800'
+      default: return 'bg-gray-100 text-gray-800'
+    }
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50 py-8 px-4 sm:px-6 lg:px-8">
+      <div className="max-w-7xl mx-auto space-y-6">
+        {/* Header */}
+        <div className="text-center">
+          <h1 className="text-3xl font-bold text-gray-900">Advanced Text Analyzer</h1>
+          <p className="mt-2 text-gray-600">
+            Extract insights from any text with AI-powered analysis
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Left Column - Input & Settings */}
+          <div className="space-y-6">
+            <Card>
+              <CardHeader>
+                <CardTitle>Input Text</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <Textarea
+                  value={inputText}
+                  onChange={(e) => setInputText(e.target.value)}
+                  rows={10}
+                  placeholder="Paste your text here or upload a file..."
+                  className="min-h-[200px]"
+                />
+                
+                <div className="flex items-center justify-between">
+                  <div>
+                    <Label htmlFor="file-upload" className="flex items-center gap-2 cursor-pointer">
+                      <FileInput className="h-4 w-4" />
+                      <span>Upload Text File</span>
+                    </Label>
+                    <input
+                      id="file-upload"
+                      type="file"
+                      accept=".txt,.md"
+                      onChange={handleFileUpload}
+                      className="hidden"
+                    />
+                  </div>
+                  <div className="text-sm text-gray-500">
+                    {inputText.split(/\s+/).filter(Boolean).length} words
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Analysis Options</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-6">
+                <div className="space-y-4">
+                  <Label className="flex items-center gap-2">
+                    <Languages className="h-4 w-4" />
+                    Output Language
+                  </Label>
+                  <select
+                    value={outputLanguage}
+                    onChange={(e) => setOutputLanguage(e.target.value)}
+                    className="w-full p-2 border rounded-md"
+                  >
+                    <option value="English">English</option>
+                    <option value="Spanish">Spanish</option>
+                    <option value="French">French</option>
+                    <option value="German">German</option>
+                    <option value="Chinese">Chinese</option>
+                  </select>
+                </div>
+
+                <div className="space-y-2">
+                  <Label className="flex items-center gap-2">
+                    <Filter className="h-4 w-4" />
+                    Keyword Filters
+                  </Label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={keywordInput}
+                      onChange={(e) => setKeywordInput(e.target.value)}
+                      placeholder="Enter keyword..."
+                      className="flex-1 p-2 border rounded-md"
+                    />
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => addKeyword('include')}
+                    >
+                      <Plus className="h-4 w-4 mr-1" />
+                      Include
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => addKeyword('exclude')}
+                    >
+                      <Plus className="h-4 w-4 mr-1" />
+                      Exclude
+                    </Button>
+                  </div>
+                  
+                  {includeKeywords.length > 0 && (
+                    <div className="space-y-1">
+                      <Label className="text-sm">Included Keywords:</Label>
+                      <div className="flex flex-wrap gap-2">
+                        {includeKeywords.map((kw, i) => (
+                          <div key={`include-${i}`} className="flex items-center bg-green-50 text-green-800 px-2 py-1 rounded-full text-sm">
+                            {kw}
+                            <button
+                              onClick={() => removeKeyword('include', i)}
+                              className="ml-1 text-green-600 hover:text-green-800"
+                            >
+                              <Trash2 className="h-3 w-3" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  
+                  {excludeKeywords.length > 0 && (
+                    <div className="space-y-1">
+                      <Label className="text-sm">Excluded Keywords:</Label>
+                      <div className="flex flex-wrap gap-2">
+                        {excludeKeywords.map((kw, i) => (
+                          <div key={`exclude-${i}`} className="flex items-center bg-red-50 text-red-800 px-2 py-1 rounded-full text-sm">
+                            {kw}
+                            <button
+                              onClick={() => removeKeyword('exclude', i)}
+                              className="ml-1 text-red-600 hover:text-red-800"
+                            >
+                              <Trash2 className="h-3 w-3" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-4">
+                  <Label>Analysis Types</Label>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="flex items-center space-x-2">
+                      <input
+                        type="checkbox"
+                        id="summary-checkbox"
+                        checked={analysisOptions.summary}
+                        onChange={(e) => setAnalysisOptions({...analysisOptions, summary: e.target.checked})}
+                        className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      <Label htmlFor="summary-checkbox">Summary</Label>
+                    </div>
+                    <div className="flex items-center space-x-2">
+                      <input
+                        type="checkbox"
+                        id="keypoints-checkbox"
+                        checked={analysisOptions.keyPoints}
+                        onChange={(e) => setAnalysisOptions({...analysisOptions, keyPoints: e.target.checked})}
+                        className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      <Label htmlFor="keypoints-checkbox">Key Points</Label>
+                    </div>
+                    <div className="flex items-center space-x-2">
+                      <input
+                        type="checkbox"
+                        id="sentiment-checkbox"
+                        checked={analysisOptions.sentiment}
+                        onChange={(e) => setAnalysisOptions({...analysisOptions, sentiment: e.target.checked})}
+                        className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      <Label htmlFor="sentiment-checkbox">Sentiment</Label>
+                    </div>
+                    <div className="flex items-center space-x-2">
+                      <input
+                        type="checkbox"
+                        id="entities-checkbox"
+                        checked={analysisOptions.entities}
+                        onChange={(e) => setAnalysisOptions({...analysisOptions, entities: e.target.checked})}
+                        className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      <Label htmlFor="entities-checkbox">Entities</Label>
+                    </div>
+                    <div className="flex items-center space-x-2">
+                      <input
+                        type="checkbox"
+                        id="qa-checkbox"
+                        checked={analysisOptions.qa}
+                        onChange={(e) => setAnalysisOptions({...analysisOptions, qa: e.target.checked})}
+                        className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      <Label htmlFor="qa-checkbox">Q&A</Label>
+                    </div>
+                  </div>
+                </div>
+
+                {analysisOptions.summary && (
+                  <div className="space-y-2">
+                    <Label>Summary Length: {summaryLength} sentences</Label>
+                    <Slider
+                      value={[summaryLength]}
+                      min={1}
+                      max={7}
+                      step={1}
+                      onValueChange={(value) => setSummaryLength(value[0])}
+                    />
+                  </div>
+                )}
+
+                {analysisOptions.keyPoints && (
+                  <div className="space-y-2">
+                    <Label>Key Points Count: {keyPointsCount}</Label>
+                    <Slider
+                      value={[keyPointsCount]}
+                      min={1}
+                      max={10}
+                      step={1}
+                      onValueChange={(value) => setKeyPointsCount(value[0])}
+                    />
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Button
+              onClick={analyzeText}
+              disabled={isLoading || !inputText.trim()}
+              className="w-full h-12"
+            >
+              {isLoading ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Analyzing...
+                </>
+              ) : (
+                'Analyze Text'
+              )}
+            </Button>
+
+            {error && (
+              <div className="p-4 bg-red-50 text-red-700 rounded-md">
+                {error}
+              </div>
+            )}
+          </div>
+
+          {/* Middle Column - Summary & Key Points */}
+          <div className="space-y-6">
+            {analysisOptions.summary && (
+              <Card>
+                <CardHeader>
+                  <div className="flex justify-between items-center">
+                    <CardTitle>Summary</CardTitle>
+                    {summary && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => copyToClipboard(summary)}
+                      >
+                        <Copy className="h-4 w-4 mr-2" />
+                        Copy
+                      </Button>
+                    )}
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <AnimatePresence>
+                    {activeProcesses.includes('summary') ? (
+                      <motion.div
+                        initial={{ opacity: 0.5 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        className="flex items-center justify-center h-32"
+                      >
+                        <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
+                      </motion.div>
+                    ) : summary ? (
+                      <motion.div
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        className="prose max-w-none"
+                      >
+                        <p className="whitespace-pre-line">{summary}</p>
+                      </motion.div>
+                    ) : (
+                      <div className="text-gray-400 italic">
+                        Summary will appear here
+                      </div>
+                    )}
+                  </AnimatePresence>
+                </CardContent>
+              </Card>
+            )}
+
+            {analysisOptions.keyPoints && (
+              <Card>
+                <CardHeader>
+                  <div className="flex justify-between items-center">
+                    <CardTitle>Key Points</CardTitle>
+                    {keyPoints.length > 0 && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => copyToClipboard(keyPoints.join('\n'))}
+                      >
+                        <Copy className="h-4 w-4 mr-2" />
+                        Copy All
+                      </Button>
+                    )}
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <AnimatePresence>
+                    {activeProcesses.includes('keyPoints') ? (
+                      <motion.div
+                        initial={{ opacity: 0.5 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        className="flex items-center justify-center h-32"
+                      >
+                        <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
+                      </motion.div>
+                    ) : keyPoints.length > 0 ? (
+                      <motion.ol
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        className="space-y-3 list-decimal pl-5"
+                      >
+                        {keyPoints.map((point, index) => (
+                          <motion.li
+                            key={index}
+                            initial={{ y: 10, opacity: 0 }}
+                            animate={{ y: 0, opacity: 1 }}
+                            transition={{ delay: index * 0.05 }}
+                            className="group"
+                          >
+                            <div className="flex justify-between items-start">
+                              <span>{point}</span>
+                              <button
+                                onClick={() => copyToClipboard(point)}
+                                className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-full hover:bg-gray-100"
+                                aria-label="Copy point"
+                              >
+                                <Copy className="h-4 w-4" />
+                              </button>
+                            </div>
+                          </motion.li>
+                        ))}
+                      </motion.ol>
+                    ) : (
+                      <div className="text-gray-400 italic">
+                        Key points will appear here
+                      </div>
+                    )}
+                  </AnimatePresence>
+                </CardContent>
+              </Card>
+            )}
+          </div>
+
+          {/* Right Column - Advanced Analyses */}
+          <div className="space-y-6">
+            {analysisOptions.sentiment && (
+              <Card>
+                <CardHeader>
+                  <CardTitle>Sentiment Analysis</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <AnimatePresence>
+                    {activeProcesses.includes('sentiment') ? (
+                      <motion.div
+                        initial={{ opacity: 0.5 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        className="flex items-center justify-center h-32"
+                      >
+                        <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
+                      </motion.div>
+                    ) : sentiment ? (
+                      <motion.div
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        className="space-y-4"
+                      >
+                        <div className={`inline-flex items-center px-3 py-1 rounded-full text-sm font-medium ${getSentimentColor()}`}>
+                          {sentiment.label.charAt(0).toUpperCase() + sentiment.label.slice(1)}
+                          <span className="ml-2">({Math.round(sentiment.score * 100)}%)</span>
+                        </div>
+                        <p className="text-sm">{sentiment.explanation}</p>
+                      </motion.div>
+                    ) : (
+                      <div className="text-gray-400 italic">
+                        Sentiment analysis will appear here
+                      </div>
+                    )}
+                  </AnimatePresence>
+                </CardContent>
+              </Card>
+            )}
+
+            {analysisOptions.entities && (
+              <Card>
+                <CardHeader>
+                  <div className="flex justify-between items-center">
+                    <CardTitle>Key Entities</CardTitle>
+                    {entities.length > 0 && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => copyToClipboard(entities.map(e => e.text).join('\n'))}
+                      >
+                        <Copy className="h-4 w-4 mr-2" />
+                        Copy All
+                      </Button>
+                    )}
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <AnimatePresence>
+                    {activeProcesses.includes('entities') ? (
+                      <motion.div
+                        initial={{ opacity: 0.5 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        className="flex items-center justify-center h-32"
+                      >
+                        <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
+                      </motion.div>
+                    ) : entities.length > 0 ? (
+                      <motion.div
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        className="space-y-3"
+                      >
+                        {['person', 'organization', 'location', 'date', 'other'].map((type) => {
+                          const filtered = entities.filter(e => e.type === type)
+                          return filtered.length > 0 ? (
+                            <div key={type} className="space-y-2">
+                              <h3 className="text-sm font-medium text-gray-500">
+                                {type.charAt(0).toUpperCase() + type.slice(1)}s
+                              </h3>
+                              <div className="flex flex-wrap gap-2">
+                                {filtered.map((entity, i) => (
+                                  <motion.div
+                                    key={`${type}-${i}`}
+                                    initial={{ scale: 0.9, opacity: 0 }}
+                                    animate={{ scale: 1, opacity: 1 }}
+                                    transition={{ delay: i * 0.05 }}
+                                    className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getEntityColor(entity.type)}`}
+                                  >
+                                    {entity.text}
+                                  </motion.div>
+                                ))}
+                              </div>
+                            </div>
+                          ) : null
+                        })}
+                      </motion.div>
+                    ) : (
+                      <div className="text-gray-400 italic">
+                        Key entities will appear here
+                      </div>
+                    )}
+                  </AnimatePresence>
+                </CardContent>
+              </Card>
+            )}
+
+            {analysisOptions.qa && (
+              <Card>
+                <CardHeader>
+                  <div className="flex justify-between items-center">
+                    <CardTitle>Questions & Answers</CardTitle>
+                    {questions.length > 0 && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => copyToClipboard(questions.map(q => `${q.text}\n${q.answer}`).join('\n\n'))}
+                      >
+                        <Copy className="h-4 w-4 mr-2" />
+                        Copy All
+                      </Button>
+                    )}
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <AnimatePresence>
+                    {activeProcesses.includes('qa') ? (
+                      <motion.div
+                        initial={{ opacity: 0.5 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        className="flex items-center justify-center h-32"
+                      >
+                        <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
+                      </motion.div>
+                    ) : questions.length > 0 ? (
+                      <motion.div
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        className="space-y-4"
+                      >
+                        {questions.map((qa, i) => (
+                          <motion.div
+                            key={i}
+                            initial={{ y: 10, opacity: 0 }}
+                            animate={{ y: 0, opacity: 1 }}
+                            transition={{ delay: i * 0.1 }}
+                            className="group"
+                          >
+                            <div className="font-medium text-gray-900">Q: {qa.question}</div>
+                            <div className="mt-1 text-gray-700">A: {qa.answer}</div>
+                            <button
+                              onClick={() => copyToClipboard(`Q: ${qa.question}\nA: ${qa.answer}`)}
+                              className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-full hover:bg-gray-100"
+                              aria-label="Copy Q&A"
+                            >
+                              <Copy className="h-4 w-4" />
+                            </button>
+                          </motion.div>
+                        ))}
+                      </motion.div>
+                    ) : (
+                      <div className="text-gray-400 italic">
+                        Questions and answers will appear here
+                      </div>
+                    )}
+                  </AnimatePresence>
+                </CardContent>
+              </Card>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
